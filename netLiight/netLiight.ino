@@ -4,14 +4,18 @@
 #include <WiFi.h>
 #include <WiFiUDP.h>
 #include "cmdBuf.h"
-
+#include "FS.h"
+#include "SPIFFS.h"
+#include "ArduinoJson.h"
 const char *ssid = "NETLED";
 const char *password = "yamashiro";
 CmdBuf cmd(0, 0);
-static const int nofCh=8;
-static const char ledPins[nofCh]={32,33,25,26 ,27,14,13,16  };
-static const char nofLed[nofCh]={281,281,281,281, 281,281,281,281};
-static strand_t hLed[nofCh];
+static int nofCh=8;
+static char ledPins[8]={32,33,25,26 ,27,14,13,16  };
+static char nofLed[8]={281,281,281,281, 281,281,281,281};
+static strand_t hLed[8];
+static char baseId=0;
+
 void initLed(void){
   for(int i=0;i<nofCh;i++){
     log_i("ch:%d, gpio:%d,nofLed:%d",i,ledPins[i],nofLed[i]);
@@ -33,9 +37,24 @@ void initLed(void){
 
 
 void setup() {
+  SPIFFS.begin(true);
+    
   // put your setup code here, to run once:
+  StaticJsonDocument<400> doc;
+  File fp = SPIFFS.open("/config.txt", FILE_READ);
+  if(fp){
+    deserializeJson(doc,fp);
+    baseId=doc["base"];
+    nofCh=doc["nofCh"];
+    log_i("baseID %d, nofCh %d",baseId,nofCh);
+    for(int i=0;i<nofCh;i++){
+      nofLed[i]=doc["nofLed"][i];
+      ledPins[i]=doc["port"][i];
+      log_i("%d:%d",ledPins[i],nofLed[i]);
+    }
+    fp.close();
+  }  
   initLed();
-  
 }
 
 void fillBlack(int ch,unsigned long diffMs, strand_t *led){
@@ -61,10 +80,10 @@ void fillLoop(int ch,unsigned long diffMs,strand_t *led){
   const int offsetMax=1000;
   
   const int nofFire=2;
-  static uint8_t color[nofCh][nofFire];
+  static uint8_t color[8][nofFire];
   static unsigned long oldMs=0;
   
-  static long mss[nofCh][nofFire+1]={{0},};
+  static long mss[8][nofFire+1]={{0},};
   {
     for (int i=0;i<nofFire+1;i++)mss[ch][i]+=diffMs;
   }
@@ -126,14 +145,14 @@ void addDark(strand_t *led){
 
 }
 
-unsigned long fadeMs[nofCh]={0};
+unsigned long fadeMs[8]={0};
 
 static uint8_t fadeTbl[256]={
   1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,7,7,7,7,7,7,8,8,8,8,8,8,9,9,9,9,10,10,10,10,10,11,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,16,16,16,17,17,17,18,18,19,19,20,20,20,21,21,22,22,23,23,24,24,25,26,26,27,27,28,29,29,30,30,31,32,33,33,34,35,36,36,37,38,39,40,41,41,42,43,44,45,46,47,48,49,51,52,53,54,55,56,58,59,60,62,63,64,66,67,69,70,72,73,75,77,78,80,82,84,86,87,89,91,93,95,98,100,102,104,106,109,111,114,116,119,121,124,127,130,132,135,138,141,144,148,151,154,158,161,165,168,172,176,180,184,188,192,196,200,205,209,214,219,223,228,233,238,244,249,255 
 };
-int fillModePrev[nofCh]={0};//Previous mode for fade in
-int fillMode[nofCh]={0};    // Set this for Immediately switch
-int fillModeNext[nofCh]={1,1,1,1, 1,1,1,1};//Set this for Fade out 
+int fillModePrev[8]={0};//Previous mode for fade in
+int fillMode[8]={0};    // Set this for Immediately switch
+int fillModeNext[8]={1,1,1,1, 1,1,1,1};//Set this for Fade out 
 
 void fadeOutIn(int ch,unsigned long diffMs,strand_t *led){
   const long fadeTime=6000;
@@ -200,16 +219,19 @@ void wifiLoop(unsigned long diffMs){
         CmdType type;
         uint8_t c;
         while(cmd.fetchCmd(&ch,&type,&c)){
+          if(ch<baseId)continue;
+          ch-=baseId;
+          if(nofCh<=ch)continue;
           switch(type){
             case CMD_PRE:
               fillModePrev[ch]=c;
               break;
             case CMD_NOW:
-              log_i("setNow ch:%d  cmd:%d   %d,%d,%d",ch,c,fillModePrev[ch],fillMode[ch],fillModeNext[ch]);
+              log_i("setNow ch:%d  cmd:%d   %d,%d,%d",ch+baseId,c,fillModePrev[ch],fillMode[ch],fillModeNext[ch]);
               fillMode[ch]=c;
               break;
             case CMD_NEXT:
-              log_i("setNext ch:%d  cmd:%d   %d,%d,%d",ch,c,fillModePrev[ch],fillMode[ch],fillModeNext[ch]);
+              log_i("setNext ch:%d  cmd:%d   %d,%d,%d",ch+baseId,c,fillModePrev[ch],fillMode[ch],fillModeNext[ch]);
               fillModeNext[ch]=c;
               break;
             default:
@@ -241,7 +263,7 @@ void loop() {
   unsigned long now=millis();
   unsigned long diffMs=now-oldMillis;
   oldMillis=now;
-  //wdt+=diffMs;
+  wdt+=diffMs;
   wifiLoop(diffMs);
 
   if(wdt>5000){
